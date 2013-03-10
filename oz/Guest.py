@@ -31,7 +31,7 @@ try:
 except ImportError:
     import urlparse
 import stat
-import libxml2
+import lxml.etree
 import logging
 import random
 import guestfs
@@ -65,11 +65,11 @@ class Guest(object):
         we should use, if not specified by the user.
         """
         if self.libvirt_type is None:
-            doc = libxml2.parseDoc(self.libvirt_conn.getCapabilities())
+            doc = lxml.etree.fromstring(self.libvirt_conn.getCapabilities())
 
-            if len(doc.xpathEval("/capabilities/guest/arch/domain[@type='kvm']")) > 0:
+            if len(doc.xpath("/capabilities/guest/arch/domain[@type='kvm']")) > 0:
                 self.libvirt_type = 'kvm'
-            elif len(doc.xpathEval("/capabilities/guest/arch/domain[@type='qemu']")) >0:
+            elif len(doc.xpath("/capabilities/guest/arch/domain[@type='qemu']")) >0:
                 self.libvirt_type = 'qemu'
             else:
                 raise oz.OzException.OzException("This host does not support virtualization type kvm or qemu")
@@ -86,15 +86,15 @@ class Guest(object):
                 network = self.libvirt_conn.networkLookupByName(netname)
 
                 xml = network.XMLDesc(0)
-                doc = libxml2.parseDoc(xml)
+                doc = lxml.etree.fromstring(xml)
 
-                forward = doc.xpathEval('/network/forward')
+                forward = doc.xpath('/network/forward')
                 if len(forward) != 1:
                     self.log.warn("Libvirt network without a forward element, skipping")
                     continue
 
-                if forward[0].prop('mode') == 'nat':
-                    ip = doc.xpathEval('/network/ip')
+                if forward[0].get('mode') == 'nat':
+                    ip = doc.xpath('/network/ip')
                     if len(ip) != 1:
                         self.log.warn("Libvirt network without an IP, skipping")
                         continue
@@ -341,18 +341,20 @@ class Guest(object):
             self.path = path
             self.bus = bus
 
+    def lxml_subelement(self, root, name, text=None, attributes={}):
+        tmp = lxml.etree.SubElement(root, name)
+        if text is not None:
+            tmp.text = text
+        for k,v in attributes.items():
+            tmp.set(k, v)
+        return tmp
 
-    def _generate_serial_xml(self, dev):
-        serial = dev.newChild(None, "serial", None)
-        serial.setProp("type", "tcp")
-        serialSource = serial.newChild(None, "source", None)
-        serialSource.setProp("mode", "bind")
-        serialSource.setProp("host", "127.0.0.1")
-        serialSource.setProp("service", str(self.listen_port))
-        serialProtocol = serial.newChild(None, "protocol", None)
-        serialProtocol.setProp("type", "raw")
-        serialTarget = serial.newChild(None, "target", None)
-        serialTarget.setProp("port", "1")
+    def _generate_serial_xml(self, devices):
+        serial = self.lxml_subelement(devices, "serial", None, {'type':'tcp'})
+        self.lxml_subelement(serial, "source", None,
+                             {'mode':'bind', 'host':'127.0.0.1', 'service':str(self.listen_port)})
+        self.lxml_subelement(serial, "protocol", None, {'type':'raw'})
+        self.lxml_subelement(serial, "target", None, {'port':'1'})
 
     def _generate_xml(self, bootdev, installdev, kernel=None, initrd=None,
                       cmdline=None):
@@ -361,110 +363,72 @@ class Guest(object):
         """
         self.log.info("Generate XML for guest %s with bootdev %s" % (self.tdl.name, bootdev))
 
-        # create XML document
-        doc = libxml2.newDoc("1.0")
-
-        # create top-level domain element
-        domain = doc.newChild(None, "domain", None)
-        domain.setProp("type", self.libvirt_type)
-
-        # create name element
-        domain.newChild(None, "name", self.tdl.name)
-
-        # create memory elements
-        domain.newChild(None, "memory", str(self.install_memory))
-        domain.newChild(None, "currentMemory", str(self.install_memory))
-
-        # create uuid
-        domain.newChild(None, "uuid", str(self.uuid))
-
-        # create clock offset
-        clock = domain.newChild(None, "clock", None)
-        clock.setProp("offset", self.clockoffset)
-
-        # create vcpu
-        domain.newChild(None, "vcpu", str(self.install_cpus))
-
-        # create features
-        features = domain.newChild(None, "features", None)
-        features.newChild(None, "acpi", None)
-        features.newChild(None, "apic", None)
-        features.newChild(None, "pae", None)
-
-        # create os
-        osNode = domain.newChild(None, "os", None)
-        osNode.newChild(None, "type", "hvm")
-
+        # top-level domain element
+        domain = lxml.etree.Element("domain", type=self.libvirt_type)
+        # name element
+        self.lxml_subelement(domain, "name", self.tdl.name)
+        # memory elements
+        self.lxml_subelement(domain, "memory", str(self.install_memory))
+        self.lxml_subelement(domain, "currentMemory", str(self.install_memory))
+        # uuid
+        self.lxml_subelement(domain, "uuid", str(self.uuid))
+        # clock offset
+        self.lxml_subelement(domain, "clock", None, {'offset':self.clockoffset})
+        # vcpu
+        self.lxml_subelement(domain, "vcpu", str(self.install_cpus))
+        # features
+        features = self.lxml_subelement(domain, "features")
+        self.lxml_subelement(features, "acpi")
+        self.lxml_subelement(features, "apic")
+        self.lxml_subelement(features, "pae")
+        # os
+        osNode = self.lxml_subelement(domain, "os")
+        self.lxml_subelement(osNode, "type", "hvm")
         if bootdev:
-            boot = osNode.newChild(None, "boot", None)
-            boot.setProp("dev", bootdev)
-
+            self.lxml_subelement(osNode, "boot", None, {'dev':bootdev})
         if kernel:
-            osNode.newChild(None, "kernel", kernel)
+            self.lxml_subelement(osNode, "kernel", kernel)
         if initrd:
-            osNode.newChild(None, "initrd", initrd)
+            self.lxml_subelement(osNode, "initrd", initrd)
         if cmdline:
-            osNode.newChild(None, "cmdline", cmdline)
-
-        # create poweroff, reboot, crash
-        domain.newChild(None, "on_poweroff", "destroy")
-        domain.newChild(None, "on_reboot", "destroy")
-        domain.newChild(None, "on_crash", "destroy")
-
-        # create devices
-        devices = domain.newChild(None, "devices", None)
+            self.lxml_subelement(osNode, "cmdline", cmdline)
+        # poweroff, reboot, crash
+        self.lxml_subelement(domain, "on_poweroff", "destroy")
+        self.lxml_subelement(domain, "on_reboot", "destroy")
+        self.lxml_subelement(domain, "on_crash", "destroy")
+        # devices
+        devices = self.lxml_subelement(domain, "devices")
         # graphics
-        graphics = devices.newChild(None, "graphics", None)
-        graphics.setProp("port", "-1")
-        graphics.setProp("type", "vnc")
+        self.lxml_subelement(devices, "graphics", None, {'port':'-1', 'type':'vnc'})
         # network
-        interface = devices.newChild(None, "interface", None)
-        interface.setProp("type", "bridge")
-        interfaceSource = interface.newChild(None, "source", None)
-        interfaceSource.setProp("bridge", self.bridge_name)
-        interfaceMac = interface.newChild(None, "mac", None)
-        interfaceMac.setProp("address", self.macaddr)
-        interfaceModel = interface.newChild(None, "model", None)
-        interfaceModel.setProp("type", self.nicmodel)
+        interface = self.lxml_subelement(devices, "interface", None, {'type':'bridge'})
+        self.lxml_subelement(interface, "source", None, {'bridge':self.bridge_name})
+        self.lxml_subelement(interface, "mac", None, {'address':self.macaddr})
+        self.lxml_subelement(interface, "model", None, {'type':self.nicmodel})
         # input
-        inputdev = devices.newChild(None, "input", None)
+        mousedict = {'bus':self.mousetype}
         if self.mousetype == "ps2":
-            inputdev.setProp("bus", "ps2")
-            inputdev.setProp("type", "mouse")
+            mousedict['type'] = 'mouse'
         elif self.mousetype == "usb":
-            inputdev.setProp("type", "tablet")
-            inputdev.setProp("bus", "usb")
+            mousedict['type'] = 'tablet'
+        self.lxml_subelement(devices, "input", None, mousedict)
         # console
-        console = devices.newChild(None, "console", None)
-        console.setProp("type", "pty")
-        consoleTarget = console.newChild(None, "target", None)
-        consoleTarget.setProp("port", "0")
+        console = self.lxml_subelement(devices, "console", None, {'type':'pty'})
+        self.lxml_subelement(console, "target", None, {'port':'0'})
         # serial
         self._generate_serial_xml(devices)
         # boot disk
-        bootDisk = devices.newChild(None, "disk", None)
-        bootDisk.setProp("device", "disk")
-        bootDisk.setProp("type", "file")
-        bootTarget = bootDisk.newChild(None, "target", None)
-        bootTarget.setProp("dev", self.disk_dev)
-        bootTarget.setProp("bus", self.disk_bus)
-        bootSource = bootDisk.newChild(None, "source", None)
-        bootSource.setProp("file", self.diskimage)
-        driver = bootDisk.newChild(None, "driver", None)
-        driver.setProp("name", "qemu")
-        driver.setProp("type", self.image_type)
-
+        bootDisk = self.lxml_subelement(devices, "disk", None, {'device':'disk', 'type':'file'})
+        self.lxml_subelement(bootDisk, "target", None, {'dev':self.disk_dev, 'bus':self.disk_bus})
+        self.lxml_subelement(bootDisk, "source", None, {'file':self.diskimage})
+        self.lxml_subelement(bootDisk, "driver", None, {'name':'qemu', 'type':self.image_type})
         # install disk (if any)
         if installdev:
-            install = devices.newChild(None, "disk", None)
-            install.setProp("type", "file")
-            install.setProp("device", installdev.devicetype)
-            source = install.newChild(None, "source", None)
-            source.setProp("file", installdev.path)
-            target = install.newChild(None, "target", None)
-            target.setProp("dev", installdev.bus)
+            install = self.lxml_subelement(devices, "disk", None, {'type':'file', 'device':installdev.devicetype})
+            self.lxml_subelement(install, "source", None, {'file':installdev.path})
+            self.lxml_subelement(install, "target", None, {'dev':installdev.bus})
 
-        xml = doc.serialize(None, 1)
+        xml = lxml.etree.tostring(domain, pretty_print=True)
         self.log.debug("Generated XML:\n%s" % (xml))
 
         return xml
@@ -485,42 +449,36 @@ class Guest(object):
         directory = os.path.dirname(self.diskimage)
         filename = os.path.basename(self.diskimage)
 
-        doc = libxml2.newDoc("1.0")
-        pool = doc.newChild(None, "pool", None)
-        pool.setProp("type", "dir")
-        pool.newChild(None, "name", "oztempdir")
-        target = pool.newChild(None, "target", None)
-        target.newChild(None, "path", directory)
-        pool_xml = doc.serialize(None, 1)
+        pool = lxml.etree.Element("pool", type="dir")
+        self.lxml_subelement(pool, "name", "oztempdir")
+        target = self.lxml_subelement(pool, "target")
+        self.lxml_subelement(target, "path", directory)
+        pool_xml = lxml.etree.tostring(pool, pretty_print=True)
 
-        doc = libxml2.newDoc("1.0")
-        vol = doc.newChild(None, "volume", None)
-        vol.setProp("type", "file")
-        vol.newChild(None, "name", filename)
-        vol.newChild(None, "allocation", "0")
-        cap = vol.newChild(None, "capacity", str(size))
-        cap.setProp("unit", "G")
-        target = vol.newChild(None, "target", None)
-        fmt = target.newChild(None, "format", None)
-        fmt.setProp("type", self.image_type)
+        vol = lxml.etree.Element("volume", type="file")
+        self.lxml_subelement(vol, "name", filename)
+        self.lxml_subelement(vol, "allocation", "0")
+        self.lxml_subelement(vol, "capacity", str(size), {'unit':'G'})
+        target = self.lxml_subelement(vol, "target")
+        self.lxml_subelement(target, "format", None, {"type":self.image_type})
         # FIXME: this makes the permissions insecure, but is needed since
-        # libvirt launches guests as qemu:qemu.
-        permissions = target.newChild(None, "permissions", None)
-        permissions.newChild(None, "mode", "0666")
-        vol_xml = doc.serialize(None, 1)
+        # libvirt launches guests as qemu:qemu
+        permissions = self.lxml_subelement(target, "permissions")
+        self.lxml_subelement(permissions, "mode", "0666")
+        vol_xml = lxml.etree.tostring(vol, pretty_print=True)
 
         # sigh.  Yes, this is racy; if a pool is defined during this loop, we
         # might miss it.  I'm not quite sure how to do it better, and in any case
-        # we don't expect that to happen to often
+        # we don't expect that to happen often
         started = False
         found = False
         for poolname in self.libvirt_conn.listDefinedStoragePools() + self.libvirt_conn.listStoragePools():
             pool = self.libvirt_conn.storagePoolLookupByName(poolname)
-            doc = libxml2.parseDoc(pool.XMLDesc(0))
-            res = doc.xpathEval('/pool/target/path')
+            doc = lxml.etree.fromstring(pool.XMLDesc(0))
+            res = doc.xpath('/pool/target/path')
             if len(res) != 1:
                 continue
-            if res[0].getContent() == directory:
+            if res[0].text == directory:
                 # OK, this pool manages that directory; make sure it is running
                 found = True
                 if not pool.isActive():
@@ -583,21 +541,21 @@ class Guest(object):
         hda, hdb, etc), and the second is a list of network devices (like vnet0,
         vnet1, etc).
         """
-        doc = libxml2.parseDoc(libvirt_dom.XMLDesc(0))
-        disktargets = doc.xpathEval("/domain/devices/disk/target")
+        doc = lxml.etree.fromstring(libvirt_dom.XMLDesc(0))
+        disktargets = doc.xpath("/domain/devices/disk/target")
         if len(disktargets) < 1:
             raise oz.OzException.OzException("Could not find disk target")
         disks = []
         for target in disktargets:
-            disks.append(target.prop('dev'))
+            disks.append(target.get('dev'))
         if not disks:
             raise oz.OzException.OzException("Could not find disk target device")
-        inttargets = doc.xpathEval("/domain/devices/interface/target")
+        inttargets = doc.xpath("/domain/devices/interface/target")
         if len(inttargets) < 1:
             raise oz.OzException.OzException("Could not find interface target")
         interfaces = []
         for target in inttargets:
-            interfaces.append(target.prop('dev'))
+            interfaces.append(target.get('dev'))
         if not interfaces:
             raise oz.OzException.OzException("Could not find interface target device")
 
@@ -918,49 +876,49 @@ class Guest(object):
         """
         Method to setup a guestfs handle to the guest disks.
         """
-        input_doc = libxml2.parseDoc(libvirt_xml)
-        namenode = input_doc.xpathEval('/domain/name')
+        input_doc = lxml.etree.fromstring(libvirt_xml)
+        namenode = input_doc.xpath('/domain/name')
         if len(namenode) != 1:
             raise oz.OzException.OzException("invalid libvirt XML with no name")
-        input_name = namenode[0].getContent()
-        disks = input_doc.xpathEval('/domain/devices/disk')
+        input_name = namenode[0].text
+        disks = input_doc.xpath('/domain/devices/disk')
         if len(disks) != 1:
             raise oz.OzException.OzException("oz cannot handle a libvirt domain with more than 1 disk")
-        source = disks[0].xpathEval('source')
+        source = disks[0].xpath('source')
         if len(source) != 1:
             raise oz.OzException.OzException("invalid <disk> entry without a source")
-        input_disk = source[0].prop('file')
-        driver = disks[0].xpathEval('driver')
+        input_disk = source[0].get('file')
+        driver = disks[0].xpath('driver')
         if len(driver) == 0:
             input_disk_type = 'raw'
         elif len(driver) == 1:
-            input_disk_type = driver[0].prop('type')
+            input_disk_type = driver[0].get('type')
         else:
             raise oz.OzException.OzException("invalid <disk> entry without a driver")
 
         for domid in self.libvirt_conn.listDomainsID():
             try:
-                doc = libxml2.parseDoc(self.libvirt_conn.lookupByID(domid).XMLDesc(0))
+                doc = lxml.etree.fromstring(self.libvirt_conn.lookupByID(domid).XMLDesc(0))
             except:
                 self.log.debug("Could not get XML for domain ID (%s) - it may have disappeared (continuing)" % (domid))
                 continue
 
-            namenode = doc.xpathEval('/domain/name')
+            namenode = doc.xpath('/domain/name')
             if len(namenode) != 1:
                 # hm, odd, a domain without a name?
                 raise oz.OzException.OzException("Saw a domain without a name, something weird is going on")
-            if input_name == namenode[0].getContent():
+            if input_name == namenode[0].text:
                 raise oz.OzException.OzException("Cannot setup ICICLE generation on a running guest")
-            disks = doc.xpathEval('/domain/devices/disk')
+            disks = doc.xpath('/domain/devices/disk')
             if len(disks) < 1:
                 # odd, a domain without a disk, but don't worry about it
                 continue
             for guestdisk in disks:
-                for source in guestdisk.xpathEval("source"):
+                for source in guestdisk.xpath("source"):
                     # FIXME: this will only work for files; we can make it work
                     # for other things by following something like:
                     # http://git.annexia.org/?p=libguestfs.git;a=blob;f=src/virt.c;h=2c6be3c6a2392ab8242d1f4cee9c0d1445844385;hb=HEAD#l169
-                    filename = str(source.prop('file'))
+                    filename = str(source.get('file'))
                     if filename == input_disk:
                         raise oz.OzException.OzException("Cannot setup ICICLE generation on a running disk")
 
@@ -1047,23 +1005,23 @@ class Guest(object):
         by the user) and add an appropriate serial section so that guest
         announcement works properly.
         """
-        input_doc = libxml2.parseDoc(libvirt_xml)
-        serialNode = input_doc.xpathEval("/domain/devices/serial")
+        input_doc = lxml.etree.fromstring(libvirt_xml)
+        serialNode = input_doc.xpath("/domain/devices/serial")
 
         # we first go looking through the existing <serial> elements (if any);
         # if any exist on port 1, we delete it from the working XML and re-add
         # it below
         for serial in serialNode:
-            target = serial.xpathEval('target')
+            target = serial.xpath('target')
             if len(target) != 1:
                 raise oz.OzException.OzException("libvirt XML has a serial port with %d target(s), it is invalid" % (len(target)))
-            if target[0].prop('port') == "1":
-                serial.unlinkNode()
+            if target[0].get('port') == "1":
+                serial.getparent().remove(serial)
                 break
 
         # at this point, the XML should be clean of any serial port=1 entries
         # and we can add the one we want
-        devices = input_doc.xpathEval("/domain/devices")
+        devices = input_doc.xpath("/domain/devices")
         devlen = len(devices)
         if devlen == 0:
             raise oz.OzException.OzException("No devices section specified, something is wrong with the libvirt XML")
@@ -1072,7 +1030,7 @@ class Guest(object):
 
         self._generate_serial_xml(devices[0])
 
-        xml = input_doc.serialize(None, 1)
+        xml = lxml.etree.tostring(input_doc, pretty_print=True)
         self.log.debug("Generated XML:\n%s" % (xml))
         return xml
 
@@ -1154,20 +1112,18 @@ class Guest(object):
         """
         Generate ICICLE XML based on the data supplied.
         """
-        doc = libxml2.newDoc("1.0")
-        icicle = doc.newChild(None, "icicle", None)
+        icicle = lxml.etree.Element("icicle")
         if description is not None:
-            description = icicle.newChild(None, "description", description)
-        packages = icicle.newChild(None, "packages", None)
+            self.lxml_subelement(icicle, "description", description)
+        packages = self.lxml_subelement(icicle, "packages")
 
         lines.sort()
         for line in lines:
             if line == "":
                 continue
-            package = packages.newChild(None, "package", None)
-            package.setProp("name", line)
+            self.lxml_subelement(packages, "package", None, {'name':line})
 
-        return doc.serialize(None, 1)
+        return lxml.etree.tostring(icicle, pretty_print=True)
 
     def mkdir_p(self, path):
         """

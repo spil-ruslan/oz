@@ -1,5 +1,5 @@
 # Copyright (C) 2010,2011  Chris Lalancette <clalance@redhat.com>
-# Copyright (C) 2012  Chris Lalancette <clalancette@gmail.com>
+# Copyright (C) 2012,2013  Chris Lalancette <clalancette@gmail.com>
 
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -22,7 +22,7 @@ Windows installation
 import random
 import re
 import os
-import libxml2
+import lxml.etree
 import shutil
 
 import oz.Guest
@@ -192,23 +192,33 @@ class Windows2008and7(Windows):
         if self.unattendfile == oz.ozutil.generate_full_auto_path("windows-" + self.tdl.update + "-jeos.xml"):
             # if this is the oz default unattend file, we modify certain
             # parameters to make installation succeed
-            doc = libxml2.parseFile(self.unattendfile)
-            xp = doc.xpathNewContext()
-            xp.xpathRegisterNs("ms", "urn:schemas-microsoft-com:unattend")
+            doc = lxml.etree.parse(self.unattendfile)
 
-            for component in xp.xpathEval('/ms:unattend/ms:settings/ms:component'):
-                component.setProp('processorArchitecture', self.winarch)
+            for component in doc.xpath('/ms:unattend/ms:settings/ms:component',
+                                       namespaces={'ms':'urn:schemas-microsoft-com:unattend'}):
+                component.set('processorArchitecture', self.winarch)
 
-            keys = xp.xpathEval('/ms:unattend/ms:settings/ms:component/ms:ProductKey')
-            keys[0].setContent(self.tdl.key)
+            keys = doc.xpath('/ms:unattend/ms:settings/ms:component/ms:ProductKey',
+                             namespaces={'ms':'urn:schemas-microsoft-com:unattend'})
+            if len(keys) != 1:
+                raise oz.OzException.OzException("Invalid autounattend file; expected 1 key, saw %d" % (len(keys)))
+            keys[0].text = self.tdl.key
 
-            adminpw = xp.xpathEval('/ms:unattend/ms:settings/ms:component/ms:UserAccounts/ms:AdministratorPassword/ms:Value')
-            adminpw[0].setContent(self.rootpw)
+            adminpw = doc.xpath('/ms:unattend/ms:settings/ms:component/ms:UserAccounts/ms:AdministratorPassword/ms:Value',
+                                namespaces={'ms':'urn:schemas-microsoft-com:unattend'})
+            if len(adminpw) != 1:
+                raise oz.OzException.OzException("Invalid autounattend file; expected 1 admin password, saw %d" % (len(adminpw)))
+            adminpw[0].text = self.rootpw
 
-            autologinpw = xp.xpathEval('/ms:unattend/ms:settings/ms:component/ms:AutoLogon/ms:Password/ms:Value')
-            autologinpw[0].setContent(self.rootpw)
+            autologinpw = doc.xpath('/ms:unattend/ms:settings/ms:component/ms:AutoLogon/ms:Password/ms:Value',
+                                    namespaces={'ms':'urn:schemas-microsoft-com:unattend'})
+            if len(autologinpw) != 1:
+                raise oz.OzException.OzException("Invalid autounattend file; expected 1 auto logon password, saw %d" % (len(autologinpw)))
+            autologinpw[0].text = self.rootpw
 
-            doc.saveFile(outname)
+            f = open(outname, 'w')
+            f.write(lxml.etree.tostring(doc, pretty_print=True))
+            f.close()
         else:
             # if the user provided their own unattend file, do not override
             # their choices; the user gets to keep both pieces if something
